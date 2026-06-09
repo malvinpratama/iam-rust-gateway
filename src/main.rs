@@ -6,7 +6,11 @@ mod router;
 
 use std::net::SocketAddr;
 
+use axum::routing::get;
+use axum_prometheus::PrometheusMetricLayer;
+use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use tokio::net::TcpListener;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::clients::AppState;
@@ -24,7 +28,21 @@ async fn main() -> anyhow::Result<()> {
     let port = common::env_or("GATEWAY_HTTP_PORT", "8080");
 
     let state = AppState::connect(&auth_addr, &user_addr, common::config::internal_token()).await?;
-    let app = router::build(state).layer(TraceLayer::new_for_http());
+
+    // Prometheus HTTP metrics (matched-path labels), exposed at /metrics.
+    let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
+
+    let app = router::build(state)
+        .route("/metrics", get(move || std::future::ready(metric_handle.render())))
+        .layer(prometheus_layer)
+        // Distributed tracing: a server span per request + trace id in the
+        // response; exported to OTLP (Jaeger) when OTEL endpoint is set.
+        .layer(OtelInResponseLayer)
+        .layer(OtelAxumLayer::default())
+        // Correlation id: accept or generate X-Request-Id and echo it back.
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(TraceLayer::new_for_http());
 
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(port, "gateway listening");
