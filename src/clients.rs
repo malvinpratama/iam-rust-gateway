@@ -6,6 +6,8 @@ use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::transport::Channel;
+use tonic_tracing_opentelemetry::middleware::client::{OtelGrpcLayer, OtelGrpcService};
+use tower::Layer;
 
 /// Injects the shared internal token into every outgoing call so the services
 /// can authenticate the gateway (defense-in-depth).
@@ -25,8 +27,8 @@ impl Interceptor for TokenInterceptor {
     }
 }
 
-pub type AuthClient = AuthServiceClient<InterceptedService<Channel, TokenInterceptor>>;
-pub type UserClient = UserServiceClient<InterceptedService<Channel, TokenInterceptor>>;
+pub type AuthClient = AuthServiceClient<InterceptedService<OtelGrpcService<Channel>, TokenInterceptor>>;
+pub type UserClient = UserServiceClient<InterceptedService<OtelGrpcService<Channel>, TokenInterceptor>>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,8 +40,10 @@ impl AppState {
     /// Lazily connect (channels reconnect on demand) to the auth and user services.
     pub async fn connect(auth_addr: &str, user_addr: &str, token: String) -> anyhow::Result<Self> {
         let interceptor = TokenInterceptor { token };
-        let auth_channel = Channel::from_shared(auth_addr.to_string())?.connect_lazy();
-        let user_channel = Channel::from_shared(user_addr.to_string())?.connect_lazy();
+        // Wrap each channel so the active trace context is injected into outgoing
+        // gRPC metadata (links the gateway span to the service spans in Jaeger).
+        let auth_channel = OtelGrpcLayer.layer(Channel::from_shared(auth_addr.to_string())?.connect_lazy());
+        let user_channel = OtelGrpcLayer.layer(Channel::from_shared(user_addr.to_string())?.connect_lazy());
         Ok(Self {
             auth: AuthServiceClient::with_interceptor(auth_channel, interceptor.clone()),
             user: UserServiceClient::with_interceptor(user_channel, interceptor),
