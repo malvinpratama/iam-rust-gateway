@@ -38,8 +38,11 @@ pub fn build(state: AppState) -> Router {
         .route("/users/:id/roles/:role", delete(revoke_role))
         .route_layer(from_fn_with_state(state.clone(), auth));
 
-    // Public auth endpoints — rate limited per IP (demo value; lower in prod).
-    let limiter = RateLimiter::new(60, Duration::from_secs(60));
+    // Public auth endpoints — rate limited per IP. Tunable via env (defaults
+    // 60 req / 60s; lower in prod). AUTH_RATE_LIMIT=0 disables it.
+    let limit = std::env::var("AUTH_RATE_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(60u32);
+    let window = std::env::var("AUTH_RATE_WINDOW_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(60u64);
+    let limiter = RateLimiter::new(limit, Duration::from_secs(window));
     let auth_public = Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))

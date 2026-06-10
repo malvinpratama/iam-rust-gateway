@@ -25,6 +25,9 @@ impl RateLimiter {
     }
 
     fn check(&self, ip: IpAddr) -> bool {
+        if self.limit == 0 {
+            return true; // disabled
+        }
         let now = Instant::now();
         let mut map = self.inner.lock().unwrap();
         let entry = map.entry(ip).or_insert((0, now + self.window));
