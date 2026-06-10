@@ -25,6 +25,10 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = common::config::validate_security() {
         anyhow::bail!("insecure configuration: {e}");
     }
+    let app_env = common::env_or("APP_ENV", "");
+    if (app_env == "production" || app_env == "prod") && common::env_or("SESSION_SECRET", "").is_empty() {
+        anyhow::bail!("SESSION_SECRET must be set in production (signs OIDC browser sessions)");
+    }
 
     let auth_addr = common::env_or("AUTH_GRPC_ADDR", "http://localhost:50051");
     let user_addr = common::env_or("USER_GRPC_ADDR", "http://localhost:50052");

@@ -68,7 +68,7 @@ fn client_creds(headers: &HeaderMap, f: &TokenForm) -> (String, String) {
 }
 
 async fn token(State(mut state): State<AppState>, headers: HeaderMap, Form(f): Form<TokenForm>) -> Response {
-    match f.grant_type.as_str() {
+    let mut resp = match f.grant_type.as_str() {
         "authorization_code" => {
             let (client_id, client_secret) = client_creds(&headers, &f);
             match state
@@ -97,7 +97,10 @@ async fn token(State(mut state): State<AppState>, headers: HeaderMap, Form(f): F
             Err(_) => (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"}))).into_response(),
         },
         _ => (StatusCode::BAD_REQUEST, Json(json!({"error":"unsupported_grant_type"}))).into_response(),
-    }
+    };
+    // OIDC: token responses must not be cached.
+    resp.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    resp
 }
 
 // ── session (stateless signed cookie) ───────────────────────
@@ -354,6 +357,14 @@ async fn authorize_consent(
             return Redirect::to(&format!("/authorize?{qs}")).into_response();
         }
     };
+    // Re-validate client + redirect_uri before issuing/redirecting (open-redirect guard).
+    let client = match state.auth.get_client(authpb::GetClientRequest { client_id: p.client_id.clone() }).await {
+        Ok(r) => r.into_inner(),
+        Err(_) => return (StatusCode::BAD_REQUEST, Html("invalid client")).into_response(),
+    };
+    if !client.redirect_uris.iter().any(|u| u == &p.redirect_uri) {
+        return (StatusCode::BAD_REQUEST, Html("invalid redirect_uri")).into_response();
+    }
     if f.action != "allow" {
         return redirect_error(&p, "access_denied");
     }
