@@ -26,6 +26,8 @@ tags:
     description: Roles and permissions
   - name: Audit
     description: Audit log
+  - name: OIDC
+    description: OpenID Connect / OAuth2 provider (discovery, JWKS, authorize, token, userinfo)
   - name: Health
 components:
   securitySchemes:
@@ -360,6 +362,85 @@ paths:
                         target: { type: string }
                         detail: { type: string }
                         created_at: { type: string, format: date-time }
+        "403": { $ref: '#/components/responses/Forbidden' }
+
+  /.well-known/openid-configuration:
+    get:
+      tags: [OIDC]
+      summary: OpenID Connect discovery document
+      security: []
+      responses:
+        "200": { description: OIDC provider metadata (issuer, endpoints, jwks_uri, supported flows) }
+  /.well-known/jwks.json:
+    get:
+      tags: [OIDC]
+      summary: JSON Web Key Set — public RS256 keys to verify tokens
+      security: []
+      responses:
+        "200": { description: JWKS document }
+  /authorize:
+    get:
+      tags: [OIDC]
+      summary: Authorization endpoint (Authorization Code + PKCE); renders login/consent
+      security: []
+      parameters:
+        - { name: response_type, in: query, required: true, schema: { type: string, enum: [code] } }
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string } }
+        - { name: scope, in: query, schema: { type: string, example: "openid profile email" } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: code_challenge, in: query, schema: { type: string } }
+        - { name: code_challenge_method, in: query, schema: { type: string, enum: [S256, plain] } }
+        - { name: nonce, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Login or consent HTML page }
+        "302": { description: Redirect to redirect_uri with code (or error) }
+  /token:
+    post:
+      tags: [OIDC]
+      summary: Token endpoint — authorization_code & refresh_token grants
+      security: []
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                grant_type: { type: string, enum: [authorization_code, refresh_token] }
+                code: { type: string }
+                redirect_uri: { type: string }
+                client_id: { type: string }
+                client_secret: { type: string }
+                code_verifier: { type: string }
+                refresh_token: { type: string }
+      responses:
+        "200": { description: "Tokens: access_token, id_token, refresh_token, token_type, expires_in" }
+        "400": { description: invalid_grant / unsupported_grant_type }
+  /userinfo:
+    get:
+      tags: [OIDC]
+      summary: UserInfo — OIDC claims for the bearer access token
+      responses:
+        "200": { description: "Claims object (sub, email)" }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /oauth/clients:
+    post:
+      tags: [OIDC]
+      summary: Register an OAuth client (admin, permission role:write)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                redirect_uris: { type: array, items: { type: string } }
+                scopes: { type: array, items: { type: string } }
+                confidential: { type: boolean }
+      responses:
+        "201": { description: "client_id and client_secret (secret returned once)" }
         "403": { $ref: '#/components/responses/Forbidden' }
 security:
   - bearerAuth: []
