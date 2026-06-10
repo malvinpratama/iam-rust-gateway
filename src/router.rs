@@ -324,16 +324,14 @@ async fn register_client(
     Json(body): Json<RegisterClientBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     identity.require("role:write")?;
-    let res = state
-        .auth
-        .register_client(authpb::RegisterClientRequest {
-            name: body.name,
-            redirect_uris: body.redirect_uris,
-            scopes: body.scopes,
-            is_confidential: body.confidential,
-        })
-        .await?
-        .into_inner();
+    let mut req = Request::new(authpb::RegisterClientRequest {
+        name: body.name,
+        redirect_uris: body.redirect_uris,
+        scopes: body.scopes,
+        is_confidential: body.confidential,
+    });
+    attach_identity(&mut req, &identity);
+    let res = state.auth.register_client(req).await?.into_inner();
     Ok((StatusCode::CREATED, Json(json!({ "client_id": res.client_id, "client_secret": res.client_secret }))))
 }
 
