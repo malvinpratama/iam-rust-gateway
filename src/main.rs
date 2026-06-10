@@ -36,10 +36,17 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::connect(&auth_addr, &user_addr, common::config::internal_token()).await?;
 
+    // Per-IP rate limiter — Redis-backed (shared across replicas) when REDIS_URL
+    // is set, else in-memory. Built here because the Redis connection is async.
+    let rl_limit: u32 = common::env_or("AUTH_RATE_LIMIT", "60").parse().unwrap_or(60);
+    let rl_window: u64 = common::env_or("AUTH_RATE_WINDOW_SECONDS", "60").parse().unwrap_or(60);
+    let limiter =
+        ratelimit::RateLimiter::from_env(rl_limit, std::time::Duration::from_secs(rl_window)).await;
+
     // Prometheus HTTP metrics (matched-path labels), exposed at /metrics.
     let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
 
-    let app = router::build(state)
+    let app = router::build(state, limiter)
         .route("/metrics", get(move || std::future::ready(metric_handle.render())))
         .layer(prometheus_layer)
         // Distributed tracing: a server span per request + trace id in the

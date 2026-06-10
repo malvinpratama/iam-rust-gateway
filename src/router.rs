@@ -12,7 +12,6 @@ use tonic::Request;
 use proto::auth::v1 as authpb;
 use proto::user::v1 as userpb;
 
-use std::time::Duration;
 
 use axum::extract::DefaultBodyLimit;
 
@@ -21,7 +20,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::middleware::{attach_identity, auth, Identity};
 use crate::ratelimit::{self, RateLimiter};
 
-pub fn build(state: AppState) -> Router {
+pub fn build(state: AppState, limiter: RateLimiter) -> Router {
     let protected = Router::new()
         .route("/auth/logout", post(logout))
         .route("/me", get(get_identity))
@@ -40,11 +39,8 @@ pub fn build(state: AppState) -> Router {
         .route("/users/:id/roles/:role", delete(revoke_role))
         .route_layer(from_fn_with_state(state.clone(), auth));
 
-    // Public auth endpoints — rate limited per IP. Tunable via env (defaults
-    // 60 req / 60s; lower in prod). AUTH_RATE_LIMIT=0 disables it.
-    let limit = std::env::var("AUTH_RATE_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(60u32);
-    let window = std::env::var("AUTH_RATE_WINDOW_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(60u64);
-    let limiter = RateLimiter::new(limit, Duration::from_secs(window));
+    // Public auth endpoints — rate limited per IP (limiter built in main:
+    // Redis-backed across replicas when REDIS_URL is set, else in-memory).
     let auth_public = Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
