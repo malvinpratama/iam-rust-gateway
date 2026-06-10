@@ -5,11 +5,12 @@ use axum::extract::{Form, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use axum::{Json, Router};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::Sha256;
 
 use proto::auth::v1 as authpb;
@@ -23,6 +24,80 @@ pub fn routes() -> Router<AppState> {
         .route("/authorize", get(authorize))
         .route("/authorize/login", post(authorize_login))
         .route("/authorize/consent", post(authorize_consent))
+        .route("/token", post(token))
+}
+
+#[derive(Deserialize)]
+struct TokenForm {
+    #[serde(default)]
+    grant_type: String,
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    redirect_uri: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    client_secret: String,
+    #[serde(default)]
+    code_verifier: String,
+    #[serde(default)]
+    refresh_token: String,
+}
+
+// client_creds: client_secret_post (form) or client_secret_basic (Authorization header).
+fn client_creds(headers: &HeaderMap, f: &TokenForm) -> (String, String) {
+    if !f.client_id.is_empty() {
+        return (f.client_id.clone(), f.client_secret.clone());
+    }
+    if let Some(b64) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|a| a.strip_prefix("Basic "))
+    {
+        if let Some((u, p)) = STANDARD
+            .decode(b64)
+            .ok()
+            .and_then(|d| String::from_utf8(d).ok())
+            .and_then(|s| s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())))
+        {
+            return (u, p);
+        }
+    }
+    (f.client_id.clone(), f.client_secret.clone())
+}
+
+async fn token(State(mut state): State<AppState>, headers: HeaderMap, Form(f): Form<TokenForm>) -> Response {
+    match f.grant_type.as_str() {
+        "authorization_code" => {
+            let (client_id, client_secret) = client_creds(&headers, &f);
+            match state
+                .auth
+                .exchange_authorization_code(authpb::ExchangeAuthorizationCodeRequest {
+                    client_id,
+                    client_secret,
+                    code: f.code,
+                    redirect_uri: f.redirect_uri,
+                    code_verifier: f.code_verifier,
+                })
+                .await
+            {
+                Ok(r) => {
+                    let t = r.into_inner();
+                    Json(json!({"access_token":t.access_token,"id_token":t.id_token,"refresh_token":t.refresh_token,"token_type":"Bearer","expires_in":t.expires_in,"scope":t.scope})).into_response()
+                }
+                Err(_) => (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"}))).into_response(),
+            }
+        }
+        "refresh_token" => match state.auth.refresh(authpb::RefreshRequest { refresh_token: f.refresh_token }).await {
+            Ok(r) => {
+                let t = r.into_inner();
+                Json(json!({"access_token":t.access_token,"refresh_token":t.refresh_token,"token_type":"Bearer","expires_in":t.expires_in})).into_response()
+            }
+            Err(_) => (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"}))).into_response(),
+        },
+        _ => (StatusCode::BAD_REQUEST, Json(json!({"error":"unsupported_grant_type"}))).into_response(),
+    }
 }
 
 // ── session (stateless signed cookie) ───────────────────────
