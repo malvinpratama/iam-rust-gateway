@@ -2,6 +2,7 @@ mod clients;
 mod docs;
 mod error;
 mod middleware;
+mod oidc;
 mod ratelimit;
 mod router;
 
