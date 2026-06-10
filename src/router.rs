@@ -37,6 +37,14 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
         .route("/roles/:name/permissions/:perm", delete(revoke_permission))
         .route("/users/:id/roles", post(assign_role))
         .route("/users/:id/roles/:role", delete(revoke_role))
+        .route("/users/:id/restore", post(restore_user))
+        // 2FA (self-service)
+        .route("/auth/2fa/enroll", post(enroll_totp))
+        .route("/auth/2fa/activate", post(activate_totp))
+        .route("/auth/2fa/disable", post(disable_totp))
+        // API keys (self-service)
+        .route("/api-keys", get(list_api_keys).post(create_api_key))
+        .route("/api-keys/:id", delete(revoke_api_key))
         .route_layer(from_fn_with_state(state.clone(), auth));
 
     // Public auth endpoints — rate limited per IP (limiter built in main:
@@ -44,6 +52,7 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
     let auth_public = Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
+        .route("/auth/login/totp", post(login_totp))
         .route("/auth/refresh", post(refresh))
         .route("/auth/verify-email/request", post(request_email_verification))
         .route("/auth/verify-email", post(verify_email))
@@ -443,13 +452,138 @@ async fn delete_user(
     State(mut state): State<AppState>,
     identity: Identity,
     Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
     identity.require("user:delete")?;
-    // Delete the identity (credentials, roles, refresh tokens). The matching
-    // profile is dropped asynchronously via a UserDeleted event.
-    let mut areq = Request::new(authpb::DeleteUserRequest { user_id: id });
+    // Soft-delete by default (recoverable via /users/:id/restore); ?hard=true
+    // removes the identity permanently. The matching profile is updated
+    // asynchronously via a UserDeleted event.
+    let hard = params.get("hard").map(|v| v == "true").unwrap_or(false);
+    let mut areq = Request::new(authpb::DeleteUserRequest { user_id: id, hard });
     attach_identity(&mut areq, &identity);
     state.auth.delete_user(areq).await?;
+    Ok(Json(json!({ "success": true, "hard": hard })))
+}
+
+async fn restore_user(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    identity.require("user:delete")?;
+    let mut areq = Request::new(authpb::RestoreUserRequest { user_id: id });
+    attach_identity(&mut areq, &identity);
+    state.auth.restore_user(areq).await?;
+    Ok(Json(json!({ "success": true })))
+}
+
+// ── 2FA handlers ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct LoginTotpBody {
+    mfa_token: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct CodeBody {
+    code: String,
+}
+
+async fn login_totp(
+    State(mut state): State<AppState>,
+    Json(body): Json<LoginTotpBody>,
+) -> ApiResult<Json<Value>> {
+    let tp = state
+        .auth
+        .login_totp(authpb::LoginTotpRequest { mfa_token: body.mfa_token, code: body.code })
+        .await?
+        .into_inner();
+    Ok(Json(token_pair_json(tp)))
+}
+
+async fn enroll_totp(
+    State(mut state): State<AppState>,
+    identity: Identity,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::EnrollTotpRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.enroll_totp(req).await?.into_inner();
+    Ok(Json(json!({
+        "secret": res.secret,
+        "otpauth_uri": res.otpauth_uri,
+        "recovery_codes": res.recovery_codes,
+    })))
+}
+
+async fn activate_totp(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<CodeBody>,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::ActivateTotpRequest { code: body.code });
+    attach_identity(&mut req, &identity);
+    state.auth.activate_totp(req).await?;
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn disable_totp(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<CodeBody>,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::DisableTotpRequest { code: body.code });
+    attach_identity(&mut req, &identity);
+    state.auth.disable_totp(req).await?;
+    Ok(Json(json!({ "success": true })))
+}
+
+// ── API key handlers ────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateApiKeyBody {
+    name: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    ttl_seconds: i64,
+}
+
+async fn create_api_key(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<CreateApiKeyBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let mut req = Request::new(authpb::CreateApiKeyRequest {
+        name: body.name,
+        scopes: body.scopes,
+        ttl_seconds: body.ttl_seconds,
+    });
+    attach_identity(&mut req, &identity);
+    let res = state.auth.create_api_key(req).await?.into_inner();
+    let key = res.key.as_ref().map(api_key_json).unwrap_or(Value::Null);
+    Ok((StatusCode::CREATED, Json(json!({ "secret": res.secret, "key": key }))))
+}
+
+async fn list_api_keys(
+    State(mut state): State<AppState>,
+    identity: Identity,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::ListApiKeysRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_api_keys(req).await?.into_inner();
+    let keys: Vec<Value> = res.keys.iter().map(api_key_json).collect();
+    Ok(Json(json!({ "keys": keys })))
+}
+
+async fn revoke_api_key(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::RevokeApiKeyRequest { id });
+    attach_identity(&mut req, &identity);
+    state.auth.revoke_api_key(req).await?;
     Ok(Json(json!({ "success": true })))
 }
 
@@ -564,11 +698,30 @@ async fn revoke_role(
 // ── JSON shaping ────────────────────────────────────────────
 
 fn token_pair_json(tp: authpb::TokenPair) -> Value {
+    // 2FA: a password-only login may return a challenge instead of tokens.
+    if tp.mfa_required {
+        return json!({
+            "mfa_required": true,
+            "mfa_token": tp.mfa_token,
+            "token_type": tp.token_type,
+        });
+    }
     json!({
         "access_token": tp.access_token,
         "refresh_token": tp.refresh_token,
         "expires_in": tp.expires_in,
         "token_type": tp.token_type,
+    })
+}
+
+fn api_key_json(k: &authpb::ApiKey) -> Value {
+    json!({
+        "id": k.id,
+        "name": k.name,
+        "scopes": k.scopes,
+        "created_at": k.created_at,
+        "expires_at": k.expires_at,
+        "last_used_at": k.last_used_at,
     })
 }
 
