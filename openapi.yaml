@@ -26,6 +26,10 @@ tags:
     description: Roles and permissions
   - name: Audit
     description: Audit log
+  - name: 2FA
+    description: Two-factor auth (TOTP) — enroll, activate, disable, login challenge
+  - name: API Keys
+    description: Scoped programmatic credentials (iamk_…)
   - name: OIDC
     description: OpenID Connect / OAuth2 provider (discovery, JWKS, authorize, token, userinfo)
   - name: Health
@@ -58,6 +62,17 @@ components:
         refresh_token: { type: string }
         expires_in: { type: integer, example: 900 }
         token_type: { type: string, example: Bearer }
+        mfa_required: { type: boolean, description: "When true, 2FA is on: tokens are empty; complete login at /auth/login/totp" }
+        mfa_token: { type: string, description: "Short-lived token to pass to /auth/login/totp" }
+    ApiKey:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        scopes: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
     Identity:
       type: object
       properties:
@@ -144,7 +159,62 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/Credentials' } } }
       responses:
+        "200": { description: "OK — tokens, or mfa_required + mfa_token when 2FA is on", content: { application/json: { schema: { $ref: '#/components/schemas/TokenPair' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /auth/login/totp:
+    post:
+      tags: [2FA]
+      summary: Complete a 2FA login with a TOTP or recovery code (public)
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [mfa_token, code], properties: { mfa_token: { type: string }, code: { type: string } } } } } }
+      responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TokenPair' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /auth/2fa/enroll:
+    post:
+      tags: [2FA]
+      summary: Begin TOTP enrollment — returns a secret, otpauth URI, and recovery codes
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { secret: { type: string }, otpauth_uri: { type: string }, recovery_codes: { type: array, items: { type: string } } } } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /auth/2fa/activate:
+    post:
+      tags: [2FA]
+      summary: Activate 2FA after verifying a TOTP code
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string } } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /auth/2fa/disable:
+    post:
+      tags: [2FA]
+      summary: Disable 2FA after verifying a TOTP or recovery code
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string } } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /api-keys:
+    get:
+      tags: [API Keys]
+      summary: List your active API keys (metadata only)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { keys: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } } } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [API Keys]
+      summary: Create a scoped API key (scopes must be a subset of your permissions). Secret shown once.
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string }, scopes: { type: array, items: { type: string } }, ttl_seconds: { type: integer, format: int64 } } } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { type: object, properties: { secret: { type: string }, key: { $ref: '#/components/schemas/ApiKey' } } } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+  /api-keys/{id}:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+    delete:
+      tags: [API Keys]
+      summary: Revoke one of your API keys
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
         "401": { $ref: '#/components/responses/Unauthorized' }
   /auth/refresh:
     post:
@@ -252,7 +322,17 @@ paths:
         "403": { $ref: '#/components/responses/Forbidden' }
     delete:
       tags: [Identity & Users]
-      summary: Delete a user — identity + profile (permission user:delete)
+      summary: Delete a user — soft by default, ?hard=true for permanent (permission user:delete)
+      parameters: [ { name: hard, in: query, required: false, schema: { type: boolean }, description: "Permanently remove instead of soft-deleting" } ]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+  /users/{id}/restore:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    post:
+      tags: [Identity & Users]
+      summary: Restore a soft-deleted user (permission user:delete)
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
         "401": { $ref: '#/components/responses/Unauthorized' }

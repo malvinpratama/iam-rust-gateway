@@ -8,7 +8,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use tonic::metadata::MetadataValue;
 
-use proto::auth::v1::ValidateTokenRequest;
+use proto::auth::v1::{ValidateApiKeyRequest, ValidateTokenRequest};
 
 use crate::clients::AppState;
 use crate::error::ApiError;
@@ -46,19 +46,27 @@ pub async fn auth(
         ApiError::new(StatusCode::UNAUTHORIZED, "missing bearer token")
     })?;
 
-    let res = state
-        .auth
-        .validate_token(ValidateTokenRequest { access_token: token })
-        .await
-        .map_err(|_| ApiError::new(StatusCode::UNAUTHORIZED, "invalid or expired token"))?
-        .into_inner();
+    // API keys (iamk_...) authenticate via ValidateApiKey; their scopes act as
+    // the caller's permissions. Everything else is a JWT access token.
+    let identity = if token.starts_with("iamk_") {
+        let res = state
+            .auth
+            .validate_api_key(ValidateApiKeyRequest { api_key: token })
+            .await
+            .map_err(|_| ApiError::new(StatusCode::UNAUTHORIZED, "invalid api key"))?
+            .into_inner();
+        Identity { user_id: res.user_id, email: res.email, roles: vec![], permissions: res.scopes }
+    } else {
+        let res = state
+            .auth
+            .validate_token(ValidateTokenRequest { access_token: token })
+            .await
+            .map_err(|_| ApiError::new(StatusCode::UNAUTHORIZED, "invalid or expired token"))?
+            .into_inner();
+        Identity { user_id: res.user_id, email: res.email, roles: res.roles, permissions: res.permissions }
+    };
 
-    req.extensions_mut().insert(Identity {
-        user_id: res.user_id,
-        email: res.email,
-        roles: res.roles,
-        permissions: res.permissions,
-    });
+    req.extensions_mut().insert(identity);
     Ok(next.run(req).await)
 }
 
