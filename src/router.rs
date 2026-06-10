@@ -25,6 +25,8 @@ pub fn build(state: AppState) -> Router {
     let protected = Router::new()
         .route("/auth/logout", post(logout))
         .route("/me", get(get_identity))
+        .route("/userinfo", get(userinfo))
+        .route("/oauth/clients", post(register_client))
         .route("/permissions", get(list_permissions))
         .route("/audit", get(list_audit))
         .route("/users/me", get(get_me))
@@ -297,6 +299,42 @@ async fn get_identity(identity: Identity) -> ApiResult<Json<Value>> {
         "roles": identity.roles,
         "permissions": identity.permissions,
     })))
+}
+
+// OIDC UserInfo: claims for the bearer token.
+async fn userinfo(identity: Identity) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({ "sub": identity.user_id, "email": identity.email })))
+}
+
+#[derive(Deserialize)]
+struct RegisterClientBody {
+    name: String,
+    #[serde(default)]
+    redirect_uris: Vec<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    confidential: bool,
+}
+
+// Register a new OAuth client (admin only).
+async fn register_client(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<RegisterClientBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    identity.require("role:write")?;
+    let res = state
+        .auth
+        .register_client(authpb::RegisterClientRequest {
+            name: body.name,
+            redirect_uris: body.redirect_uris,
+            scopes: body.scopes,
+            is_confidential: body.confidential,
+        })
+        .await?
+        .into_inner();
+    Ok((StatusCode::CREATED, Json(json!({ "client_id": res.client_id, "client_secret": res.client_secret }))))
 }
 
 // Returns every permission defined in the system.
