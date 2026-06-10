@@ -1,6 +1,8 @@
 //! OIDC Authorization Code + PKCE browser flow: login form → signed session
 //! cookie → consent → authorization code. Mirrors the Go gateway.
 
+use std::collections::HashMap;
+
 use axum::extract::{Form, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -25,6 +27,25 @@ pub fn routes() -> Router<AppState> {
         .route("/authorize/login", post(authorize_login))
         .route("/authorize/consent", post(authorize_consent))
         .route("/token", post(token))
+        .route("/logout", get(logout))
+}
+
+// OIDC RP-initiated end-session: clear the browser session, return to caller.
+async fn logout(headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let dest = q
+        .get("post_logout_redirect_uri")
+        .filter(|d| d.starts_with("http://") || d.starts_with("https://"))
+        .cloned()
+        .unwrap_or_else(|| "/".to_string());
+    let mut resp = Redirect::to(&dest).into_response();
+    let clear = format!(
+        "iam_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
+        if is_secure(&headers) { "; Secure" } else { "" }
+    );
+    if let Ok(v) = clear.parse() {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
 }
 
 #[derive(Deserialize)]
