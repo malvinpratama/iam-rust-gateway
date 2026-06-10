@@ -1,3 +1,4 @@
+mod authorize;
 mod clients;
 mod docs;
 mod error;

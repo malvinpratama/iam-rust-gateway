@@ -57,6 +57,7 @@ pub fn build(state: AppState) -> Router {
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .merge(crate::docs::routes())
         .merge(crate::oidc::routes())
+        .merge(crate::authorize::routes())
         .merge(auth_public);
 
     public
