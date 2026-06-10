@@ -1,4 +1,5 @@
 mod clients;
+mod docs;
 mod error;
 mod middleware;
 mod ratelimit;

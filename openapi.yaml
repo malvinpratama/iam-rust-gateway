@@ -1,0 +1,365 @@
+openapi: 3.0.3
+info:
+  title: IAM — Identity & Access Management API
+  description: |
+    Auth + User microservices with granular RBAC, behind a REST→gRPC gateway.
+
+    **How to try it:**
+    1. `POST /auth/login` with the demo admin (`admin@iam.local` / the demo
+       password) and copy `access_token`.
+    2. Click **Authorize** (top right) and paste the token.
+    3. Call any protected endpoint below.
+
+    The same API is served by both the Go and the Rust stack.
+  version: "0.6.0"
+  license:
+    name: MIT
+servers:
+  - url: /
+    description: This gateway
+tags:
+  - name: Auth
+    description: Registration, login, tokens, recovery
+  - name: Identity & Users
+    description: Your identity and user profiles
+  - name: RBAC
+    description: Roles and permissions
+  - name: Audit
+    description: Audit log
+  - name: Health
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string, example: "permission denied: user:read" }
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, example: alice@iam.local }
+        password: { type: string, format: password, minLength: 8, example: alicepass123 }
+    RegisterResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_in: { type: integer, example: 900 }
+        token_type: { type: string, example: Bearer }
+    Identity:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        roles: { type: array, items: { type: string }, example: ["user"] }
+        permissions: { type: array, items: { type: string }, example: ["profile:read", "profile:write"] }
+    Profile:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: string }
+        bio: { type: string }
+        avatar_url: { type: string }
+        phone: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ProfileUpdate:
+      type: object
+      properties:
+        display_name: { type: string }
+        bio: { type: string }
+        avatar_url: { type: string }
+        phone: { type: string }
+    Role:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string }
+        permissions: { type: array, items: { type: string } }
+    Permission:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string }
+    Success:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+    DevToken:
+      type: object
+      properties:
+        success: { type: boolean }
+        dev_token: { type: string, description: "Returned only in non-production, to ease testing." }
+  responses:
+    Unauthorized:
+      description: Missing/invalid/expired token or bad credentials
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Authenticated but missing the required permission
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Resource not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { status: { type: string, example: ok } } } } } }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user (public)
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Credentials' } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/RegisterResponse' } } } }
+        "400": { description: Validation error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "409": { description: Email already registered, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in, get an access + refresh token (public)
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Credentials' } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TokenPair' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate a refresh token for a new pair (public)
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [refresh_token], properties: { refresh_token: { type: string } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TokenPair' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the refresh token and denylist the access token
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [refresh_token], properties: { refresh_token: { type: string } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /auth/verify-email/request:
+    post:
+      tags: [Auth]
+      summary: Request an email-verification token (public)
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string, format: email } } } } } }
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DevToken' } } } } }
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Verify an email with a token (public)
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [token], properties: { token: { type: string } } } } } }
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }, "400": { description: Invalid/expired, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } } }
+  /auth/password-reset/request:
+    post:
+      tags: [Auth]
+      summary: Request a password-reset token (public)
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string, format: email } } } } } }
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DevToken' } } } } }
+  /auth/password-reset:
+    post:
+      tags: [Auth]
+      summary: Reset a password with a token (public)
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [token, new_password], properties: { token: { type: string }, new_password: { type: string, format: password, minLength: 8 } } } } } }
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }, "400": { description: Invalid/expired, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } } }
+
+  /me:
+    get:
+      tags: [Identity & Users]
+      summary: Your identity, roles and permissions
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Identity' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /users/me:
+    get:
+      tags: [Identity & Users]
+      summary: Your own profile (lazily created if missing)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+  /users:
+    get:
+      tags: [Identity & Users]
+      summary: List/search profiles (permission user:read)
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+        - { name: query, in: query, schema: { type: string }, description: search display_name }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profiles: { type: array, items: { $ref: '#/components/schemas/Profile' } }
+                  total: { type: integer }
+                  page: { type: integer }
+                  page_size: { type: integer }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+  /users/{id}:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    get:
+      tags: [Identity & Users]
+      summary: Get a user profile (permission user:read)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Identity & Users]
+      summary: Update a profile (own = profile:write; others = user:write)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileUpdate' } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [Identity & Users]
+      summary: Delete a user — identity + profile (permission user:delete)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+
+  /roles:
+    get:
+      tags: [RBAC]
+      summary: List roles (permission role:read)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { roles: { type: array, items: { $ref: '#/components/schemas/Role' } } } } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [RBAC]
+      summary: Create a role (permission role:write)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string }, description: { type: string } } } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Role' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "409": { description: Already exists, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /roles/{name}:
+    parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+    patch:
+      tags: [RBAC]
+      summary: Update a role description (permission role:write)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { description: { type: string } } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Role' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [RBAC]
+      summary: Delete a role (permission role:write; built-ins protected)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "409": { description: Built-in role, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /roles/{name}/permissions:
+    parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+    post:
+      tags: [RBAC]
+      summary: Grant a permission to a role (permission role:write)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permission], properties: { permission: { type: string } } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+  /roles/{name}/permissions/{perm}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - { name: perm, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [RBAC]
+      summary: Revoke a permission from a role (permission role:write)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+  /permissions:
+    get:
+      tags: [RBAC]
+      summary: List all permissions (permission role:read)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { permissions: { type: array, items: { $ref: '#/components/schemas/Permission' } } } } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+  /users/{id}/roles:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    post:
+      tags: [RBAC]
+      summary: Assign a role to a user (permission role:assign)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [role], properties: { role: { type: string } } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+  /users/{id}/roles/{role}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: role, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [RBAC]
+      summary: Revoke a role from a user (permission role:assign)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+
+  /audit:
+    get:
+      tags: [Audit]
+      summary: Read the audit log (permission audit:read)
+      parameters: [ { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        actor_id: { type: string }
+                        actor_email: { type: string }
+                        action: { type: string }
+                        target: { type: string }
+                        detail: { type: string }
+                        created_at: { type: string, format: date-time }
+        "403": { $ref: '#/components/responses/Forbidden' }
+security:
+  - bearerAuth: []
