@@ -44,6 +44,7 @@ async fn discovery(headers: HeaderMap) -> Json<Value> {
         "token_endpoint": format!("{iss}/token"),
         "userinfo_endpoint": format!("{iss}/userinfo"),
         "jwks_uri": format!("{iss}/.well-known/jwks.json"),
+        "end_session_endpoint": format!("{iss}/logout"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "subject_types_supported": ["public"],
