@@ -25,6 +25,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/authorize", get(authorize))
         .route("/authorize/login", post(authorize_login))
+        .route("/authorize/totp", post(authorize_totp))
         .route("/authorize/consent", post(authorize_consent))
         .route("/token", post(token))
         .route("/logout", get(logout))
@@ -352,14 +353,84 @@ async fn authorize_login(
             return (StatusCode::UNAUTHORIZED, Html(login_page(&p, "Invalid email or password"))).into_response()
         }
     };
-    let vt = match state.auth.validate_token(authpb::ValidateTokenRequest { access_token: tp.access_token }).await {
+    // 2FA: the password step alone isn't enough — prompt for a TOTP/recovery code.
+    if tp.mfa_required {
+        return Html(totp_page(&p, &tp.mfa_token, "")).into_response();
+    }
+    finish_login(&mut state, &p, tp.access_token, &headers).await
+}
+
+#[derive(Deserialize)]
+struct TotpForm {
+    #[serde(default)]
+    mfa_token: String,
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    response_type: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    redirect_uri: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    code_challenge: String,
+    #[serde(default)]
+    code_challenge_method: String,
+    #[serde(default)]
+    nonce: String,
+}
+
+impl TotpForm {
+    fn params(&self) -> AuthzParams {
+        AuthzParams {
+            response_type: self.response_type.clone(),
+            client_id: self.client_id.clone(),
+            redirect_uri: self.redirect_uri.clone(),
+            scope: self.scope.clone(),
+            state: self.state.clone(),
+            code_challenge: self.code_challenge.clone(),
+            code_challenge_method: self.code_challenge_method.clone(),
+            nonce: self.nonce.clone(),
+        }
+    }
+}
+
+/// Completes the 2FA step of the browser login.
+async fn authorize_totp(
+    State(mut state): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<TotpForm>,
+) -> Response {
+    let p = f.params();
+    let tp = match state
+        .auth
+        .login_totp(authpb::LoginTotpRequest { mfa_token: f.mfa_token.clone(), code: f.code })
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(_) => {
+            return (StatusCode::UNAUTHORIZED, Html(totp_page(&p, &f.mfa_token, "Invalid or expired code")))
+                .into_response()
+        }
+    };
+    finish_login(&mut state, &p, tp.access_token, &headers).await
+}
+
+/// Resolves the identity from a fresh access token, sets the session cookie,
+/// and returns to the authorize endpoint.
+async fn finish_login(state: &mut AppState, p: &AuthzParams, access_token: String, headers: &HeaderMap) -> Response {
+    let vt = match state.auth.validate_token(authpb::ValidateTokenRequest { access_token }).await {
         Ok(r) => r.into_inner(),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Html("login failed")).into_response(),
     };
     let cookie = sign_session(&vt.user_id, &vt.email);
-    let qs = serde_urlencoded::to_string(&p).unwrap_or_default();
+    let qs = serde_urlencoded::to_string(p).unwrap_or_default();
     let mut resp = Redirect::to(&format!("/authorize?{qs}")).into_response();
-    if let Ok(v) = session_cookie(&cookie, is_secure(&headers)).parse() {
+    if let Ok(v) = session_cookie(&cookie, is_secure(headers)).parse() {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
@@ -446,7 +517,7 @@ const PAGE_CSS: &str = r#"<style>body{font-family:system-ui,sans-serif;backgroun
 .card{background:#1e293b;padding:2rem 2.25rem;border-radius:14px;width:340px;box-shadow:0 10px 40px rgba(0,0,0,.4)}
 h1{font-size:1.15rem;margin:0 0 .25rem}p{color:#94a3b8;font-size:.85rem;margin:.25rem 0 1.25rem}
 label{display:block;font-size:.8rem;margin:.6rem 0 .2rem;color:#cbd5e1}
-input[type=email],input[type=password]{width:100%;padding:.6rem .7rem;border:1px solid #334155;border-radius:8px;background:#0f172a;color:#e2e8f0;box-sizing:border-box}
+input[type=email],input[type=password],input[type=text]{width:100%;padding:.6rem .7rem;border:1px solid #334155;border-radius:8px;background:#0f172a;color:#e2e8f0;box-sizing:border-box}
 button{margin-top:1.1rem;width:100%;padding:.65rem;border:0;border-radius:8px;background:#6366f1;color:#fff;font-weight:600;cursor:pointer}
 button.ghost{background:#334155}.row{display:flex;gap:.6rem}.err{color:#f87171;font-size:.8rem;margin:.4rem 0}
 .scopes{list-style:none;padding:0;margin:.5rem 0}.scopes li{padding:.35rem 0;border-bottom:1px solid #334155;font-size:.9rem}</style>"#;
@@ -466,6 +537,26 @@ fn login_page(p: &AuthzParams, err: &str) -> String {
 {hidden}<button type="submit">Sign in</button></form></body></html>"#,
         css = PAGE_CSS,
         err = e,
+        hidden = hidden_fields(p),
+    )
+}
+
+fn totp_page(p: &AuthzParams, mfa_token: &str, err: &str) -> String {
+    let e = if err.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<div class="err">{}</div>"#, esc(err))
+    };
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>Two-factor · IAM</title>{css}</head><body>
+<form class="card" method="post" action="/authorize/totp">
+<h1>🔐 Two-factor authentication</h1><p>Enter the 6-digit code from your authenticator app (or a recovery code).</p>{err}
+<label>Code</label><input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus required>
+<input type="hidden" name="mfa_token" value="{mfa}">
+{hidden}<button type="submit">Verify</button></form></body></html>"#,
+        css = PAGE_CSS,
+        err = e,
+        mfa = esc(mfa_token),
         hidden = hidden_fields(p),
     )
 }
