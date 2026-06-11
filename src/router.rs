@@ -37,6 +37,7 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
         .route("/roles/:name/permissions/:perm", delete(revoke_permission))
         .route("/users/:id/roles", post(assign_role))
         .route("/users/:id/roles/:role", delete(revoke_role))
+        .route("/roles/:name/assignments", post(assign_role_bulk))
         .route("/users/:id/restore", post(restore_user))
         // 2FA (self-service)
         .route("/auth/2fa/enroll", post(enroll_totp))
@@ -138,6 +139,7 @@ struct ListQuery {
     page: Option<i32>,
     page_size: Option<i32>,
     query: Option<String>,
+    deleted: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -409,6 +411,7 @@ async fn list_users(
         page: q.page.unwrap_or(0),
         page_size: q.page_size.unwrap_or(0),
         query: q.query.unwrap_or_default(),
+        deleted_only: q.deleted.unwrap_or(false),
     });
     attach_identity(&mut req, &identity);
     let res = state.user.list_profiles(req).await?.into_inner();
@@ -681,6 +684,24 @@ async fn assign_role(
     attach_identity(&mut req, &identity);
     state.auth.assign_role(req).await?;
     Ok(Json(json!({ "success": true })))
+}
+
+#[derive(Deserialize)]
+struct BulkAssignBody {
+    user_ids: Vec<String>,
+}
+
+async fn assign_role_bulk(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Path(name): Path<String>,
+    Json(body): Json<BulkAssignBody>,
+) -> ApiResult<Json<Value>> {
+    identity.require("role:assign")?;
+    let mut req = Request::new(authpb::AssignRoleBulkRequest { role_name: name, user_ids: body.user_ids });
+    attach_identity(&mut req, &identity);
+    let res = state.auth.assign_role_bulk(req).await?.into_inner();
+    Ok(Json(json!({ "assigned": res.assigned, "failed": res.failed })))
 }
 
 async fn revoke_role(
