@@ -150,14 +150,6 @@ struct UpdateBody {
 }
 
 #[derive(Deserialize)]
-struct ListQuery {
-    page: Option<i32>,
-    page_size: Option<i32>,
-    query: Option<String>,
-    deleted: Option<bool>,
-}
-
-#[derive(Deserialize)]
 struct AuditQuery {
     limit: Option<i32>,
 }
@@ -561,27 +553,43 @@ async fn get_user(
     Ok(Json(profile_json(p)))
 }
 
+// The user directory is the active tenant's members (from auth) joined with
+// their profiles (one batch GetProfiles call — no N+1), so it stays tenant-
+// scoped: a tenant admin never sees other tenants' users.
 async fn list_users(
     State(mut state): State<AppState>,
     identity: Identity,
-    Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
     identity.require("user:read")?;
-    let mut req = Request::new(userpb::ListProfilesRequest {
-        page: q.page.unwrap_or(0),
-        page_size: q.page_size.unwrap_or(0),
-        query: q.query.unwrap_or_default(),
-        deleted_only: q.deleted.unwrap_or(false),
-    });
-    attach_identity(&mut req, &identity);
-    let res = state.user.list_profiles(req).await?.into_inner();
-    let profiles: Vec<Value> = res.profiles.into_iter().map(profile_json).collect();
-    Ok(Json(json!({
-        "profiles": profiles,
-        "total": res.total,
-        "page": res.page,
-        "page_size": res.page_size,
-    })))
+    let mut mreq = Request::new(authpb::ListMembersRequest {});
+    attach_identity(&mut mreq, &identity);
+    let members = state.auth.list_members(mreq).await?.into_inner().members;
+
+    let ids: Vec<String> = members.iter().map(|m| m.user_id.clone()).collect();
+    let mut prof: std::collections::HashMap<String, userpb::Profile> = std::collections::HashMap::new();
+    if !ids.is_empty() {
+        let mut preq = Request::new(userpb::GetProfilesRequest { user_ids: ids });
+        attach_identity(&mut preq, &identity);
+        for p in state.user.get_profiles(preq).await?.into_inner().profiles {
+            prof.insert(p.user_id.clone(), p);
+        }
+    }
+    let profiles: Vec<Value> = members
+        .into_iter()
+        .map(|m| {
+            let p = prof.get(&m.user_id);
+            json!({
+                "user_id": m.user_id,
+                "email": m.email,
+                "status": m.status,
+                "display_name": p.map(|x| x.display_name.clone()).unwrap_or_default(),
+                "bio": p.map(|x| x.bio.clone()).unwrap_or_default(),
+                "created_at": p.map(|x| x.created_at.clone()).unwrap_or_default(),
+            })
+        })
+        .collect();
+    let total = profiles.len();
+    Ok(Json(json!({ "profiles": profiles, "total": total, "page": 1, "page_size": total })))
 }
 
 async fn update_user(
