@@ -24,6 +24,8 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
     let protected = Router::new()
         .route("/auth/logout", post(logout))
         .route("/me", get(get_identity))
+        .route("/me/memberships", get(list_memberships))
+        .route("/auth/switch", post(switch_tenant))
         .route("/userinfo", get(userinfo))
         .route("/oauth/clients", post(register_client))
         .route("/permissions", get(list_permissions))
@@ -86,6 +88,13 @@ struct Credentials {
 #[derive(Deserialize)]
 struct RefreshBody {
     refresh_token: String,
+}
+
+#[derive(Deserialize)]
+struct SwitchBody {
+    tenant_id: String,
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -341,6 +350,42 @@ async fn register_client(
     attach_identity(&mut req, &identity);
     let res = state.auth.register_client(req).await?.into_inner();
     Ok((StatusCode::CREATED, Json(json!({ "client_id": res.client_id, "client_secret": res.client_secret }))))
+}
+
+// M6: tenants the caller is an active member of (feeds the console switcher).
+async fn list_memberships(
+    State(mut state): State<AppState>,
+    identity: Identity,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::ListMembershipsRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_my_memberships(req).await?.into_inner();
+    let memberships: Vec<Value> = res
+        .memberships
+        .into_iter()
+        .map(|m| json!({
+            "tenant_id": m.tenant_id,
+            "tenant_slug": m.tenant_slug,
+            "tenant_name": m.tenant_name,
+            "status": m.status,
+        }))
+        .collect();
+    Ok(Json(json!({ "memberships": memberships })))
+}
+
+// M6: re-issue a token pair bound to another tenant/project the caller belongs to.
+async fn switch_tenant(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<SwitchBody>,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::SwitchTenantRequest {
+        tenant_id: body.tenant_id,
+        project_id: body.project_id.unwrap_or_default(),
+    });
+    attach_identity(&mut req, &identity);
+    let tp = state.auth.switch_tenant(req).await?.into_inner();
+    Ok(Json(token_pair_json(tp)))
 }
 
 // Returns every permission defined in the system.
