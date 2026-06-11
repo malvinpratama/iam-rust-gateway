@@ -26,6 +26,11 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
         .route("/me", get(get_identity))
         .route("/me/memberships", get(list_memberships))
         .route("/auth/switch", post(switch_tenant))
+        // M6.4: tenant / project / member administration.
+        .route("/tenants", get(list_tenants).post(create_tenant))
+        .route("/projects", get(list_projects).post(create_project))
+        .route("/members", get(list_members).post(add_member))
+        .route("/members/:user_id", delete(remove_member))
         .route("/userinfo", get(userinfo))
         .route("/oauth/clients", post(register_client))
         .route("/permissions", get(list_permissions))
@@ -386,6 +391,115 @@ async fn switch_tenant(
     attach_identity(&mut req, &identity);
     let tp = state.auth.switch_tenant(req).await?.into_inner();
     Ok(Json(token_pair_json(tp)))
+}
+
+// ── M6.4: tenant / project / member administration ──────────
+
+#[derive(Deserialize)]
+struct SlugNameBody {
+    slug: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct EmailMemberBody {
+    email: String,
+}
+
+async fn create_tenant(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<SlugNameBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    identity.require("tenant:write")?;
+    let mut req = Request::new(authpb::CreateTenantRequest { slug: body.slug, name: body.name });
+    attach_identity(&mut req, &identity);
+    let t = state.auth.create_tenant(req).await?.into_inner();
+    Ok((StatusCode::CREATED, Json(json!({ "id": t.id, "slug": t.slug, "name": t.name, "status": t.status }))))
+}
+
+async fn list_tenants(
+    State(mut state): State<AppState>,
+    identity: Identity,
+) -> ApiResult<Json<Value>> {
+    identity.require("tenant:read")?;
+    let mut req = Request::new(authpb::ListTenantsRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_tenants(req).await?.into_inner();
+    let tenants: Vec<Value> = res
+        .tenants
+        .into_iter()
+        .map(|t| json!({ "id": t.id, "slug": t.slug, "name": t.name, "status": t.status }))
+        .collect();
+    Ok(Json(json!({ "tenants": tenants })))
+}
+
+async fn create_project(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<SlugNameBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    identity.require("project:write")?;
+    let mut req = Request::new(authpb::CreateProjectRequest { slug: body.slug, name: body.name });
+    attach_identity(&mut req, &identity);
+    let p = state.auth.create_project(req).await?.into_inner();
+    Ok((StatusCode::CREATED, Json(json!({ "id": p.id, "tenant_id": p.tenant_id, "slug": p.slug, "name": p.name }))))
+}
+
+async fn list_projects(
+    State(mut state): State<AppState>,
+    identity: Identity,
+) -> ApiResult<Json<Value>> {
+    identity.require("project:read")?;
+    let mut req = Request::new(authpb::ListProjectsRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_projects(req).await?.into_inner();
+    let projects: Vec<Value> = res
+        .projects
+        .into_iter()
+        .map(|p| json!({ "id": p.id, "tenant_id": p.tenant_id, "slug": p.slug, "name": p.name }))
+        .collect();
+    Ok(Json(json!({ "projects": projects })))
+}
+
+async fn list_members(
+    State(mut state): State<AppState>,
+    identity: Identity,
+) -> ApiResult<Json<Value>> {
+    identity.require("member:read")?;
+    let mut req = Request::new(authpb::ListMembersRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_members(req).await?.into_inner();
+    let members: Vec<Value> = res
+        .members
+        .into_iter()
+        .map(|m| json!({ "user_id": m.user_id, "email": m.email, "status": m.status }))
+        .collect();
+    Ok(Json(json!({ "members": members })))
+}
+
+async fn add_member(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<EmailMemberBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    identity.require("member:write")?;
+    let mut req = Request::new(authpb::AddMemberRequest { email: body.email });
+    attach_identity(&mut req, &identity);
+    let m = state.auth.add_member(req).await?.into_inner();
+    Ok((StatusCode::CREATED, Json(json!({ "user_id": m.user_id, "email": m.email, "status": m.status }))))
+}
+
+async fn remove_member(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Path(user_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    identity.require("member:write")?;
+    let mut req = Request::new(authpb::RemoveMemberRequest { user_id });
+    attach_identity(&mut req, &identity);
+    state.auth.remove_member(req).await?;
+    Ok(Json(json!({ "success": true })))
 }
 
 // Returns every permission defined in the system.
