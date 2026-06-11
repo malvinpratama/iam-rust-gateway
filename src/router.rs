@@ -40,6 +40,7 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
         .route("/roles/:name/assignments", post(assign_role_bulk))
         .route("/users/:id/restore", post(restore_user))
         // 2FA (self-service)
+        .route("/auth/2fa", get(totp_status))
         .route("/auth/2fa/enroll", post(enroll_totp))
         .route("/auth/2fa/activate", post(activate_totp))
         .route("/auth/2fa/disable", post(disable_totp))
@@ -503,6 +504,16 @@ async fn login_totp(
         .await?
         .into_inner();
     Ok(Json(token_pair_json(tp)))
+}
+
+async fn totp_status(
+    State(mut state): State<AppState>,
+    identity: Identity,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::GetTotpStatusRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.get_totp_status(req).await?.into_inner();
+    Ok(Json(json!({ "enabled": res.enabled })))
 }
 
 async fn enroll_totp(
