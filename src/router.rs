@@ -42,7 +42,7 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
         .route("/roles/:name", patch(update_role).delete(delete_role))
         .route("/roles/:name/permissions", post(grant_permission))
         .route("/roles/:name/permissions/:perm", delete(revoke_permission))
-        .route("/users/:id/roles", post(assign_role))
+        .route("/users/:id/roles", get(get_user_role_assignments).post(assign_role))
         .route("/users/:id/roles/:role", delete(revoke_role))
         .route("/roles/:name/assignments", post(assign_role_bulk))
         .route("/users/:id/restore", post(restore_user))
@@ -121,6 +121,8 @@ struct ResetPasswordBody {
 #[derive(Deserialize)]
 struct AssignRoleBody {
     role: String,
+    #[serde(default)]
+    project_id: String, // empty = tenant-wide
 }
 
 #[derive(Deserialize)]
@@ -858,7 +860,11 @@ async fn assign_role(
     Json(body): Json<AssignRoleBody>,
 ) -> ApiResult<Json<Value>> {
     identity.require("role:assign")?;
-    let mut req = Request::new(authpb::AssignRoleRequest { user_id: id, role_name: body.role });
+    let mut req = Request::new(authpb::AssignRoleRequest {
+        user_id: id,
+        role_name: body.role,
+        project_id: body.project_id,
+    });
     attach_identity(&mut req, &identity);
     state.auth.assign_role(req).await?;
     Ok(Json(json!({ "success": true })))
@@ -867,6 +873,8 @@ async fn assign_role(
 #[derive(Deserialize)]
 struct BulkAssignBody {
     user_ids: Vec<String>,
+    #[serde(default)]
+    project_id: String,
 }
 
 async fn assign_role_bulk(
@@ -876,7 +884,11 @@ async fn assign_role_bulk(
     Json(body): Json<BulkAssignBody>,
 ) -> ApiResult<Json<Value>> {
     identity.require("role:assign")?;
-    let mut req = Request::new(authpb::AssignRoleBulkRequest { role_name: name, user_ids: body.user_ids });
+    let mut req = Request::new(authpb::AssignRoleBulkRequest {
+        role_name: name,
+        user_ids: body.user_ids,
+        project_id: body.project_id,
+    });
     attach_identity(&mut req, &identity);
     let res = state.auth.assign_role_bulk(req).await?.into_inner();
     Ok(Json(json!({ "assigned": res.assigned, "failed": res.failed })))
@@ -886,12 +898,35 @@ async fn revoke_role(
     State(mut state): State<AppState>,
     identity: Identity,
     Path((id, role)): Path<(String, String)>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
     identity.require("role:assign")?;
-    let mut req = Request::new(authpb::RevokeRoleRequest { user_id: id, role_name: role });
+    let mut req = Request::new(authpb::RevokeRoleRequest {
+        user_id: id,
+        role_name: role,
+        project_id: q.get("project_id").cloned().unwrap_or_default(),
+    });
     attach_identity(&mut req, &identity);
     state.auth.revoke_role(req).await?;
     Ok(Json(json!({ "success": true })))
+}
+
+// M6: a user's role assignments in the active tenant (role + project scope).
+async fn get_user_role_assignments(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    identity.require("role:read")?;
+    let mut req = Request::new(authpb::GetUserRoleAssignmentsRequest { user_id: id });
+    attach_identity(&mut req, &identity);
+    let res = state.auth.get_user_role_assignments(req).await?.into_inner();
+    let assignments: Vec<Value> = res
+        .assignments
+        .into_iter()
+        .map(|a| json!({ "role": a.role, "project_id": a.project_id, "project_slug": a.project_slug }))
+        .collect();
+    Ok(Json(json!({ "assignments": assignments })))
 }
 
 // ── JSON shaping ────────────────────────────────────────────
