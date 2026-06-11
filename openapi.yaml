@@ -288,6 +288,7 @@ paths:
         - { name: page, in: query, schema: { type: integer, default: 1 } }
         - { name: page_size, in: query, schema: { type: integer, default: 20, maximum: 100 } }
         - { name: query, in: query, schema: { type: string }, description: search display_name }
+        - { name: deleted, in: query, schema: { type: boolean }, description: "list soft-deleted users instead (for restore)" }
       responses:
         "200":
           description: OK
@@ -404,6 +405,16 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [role], properties: { role: { type: string } } } } } }
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Success' } } } }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+  /roles/{name}/assignments:
+    parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+    post:
+      tags: [RBAC]
+      summary: Assign this role to many users at once (permission role:assign)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [user_ids], properties: { user_ids: { type: array, items: { type: string, format: uuid } } } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { assigned: { type: integer }, failed: { type: array, items: { type: string } } } } } } }
         "403": { $ref: '#/components/responses/Forbidden' }
         "404": { $ref: '#/components/responses/NotFound' }
   /users/{id}/roles/{role}:
