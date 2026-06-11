@@ -20,6 +20,8 @@ pub struct Identity {
     pub email: String,
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
+    pub tenant_id: String,  // M6: active tenant the token is bound to
+    pub project_id: String, // M6: active project (empty = tenant-wide)
 }
 
 impl Identity {
@@ -55,7 +57,7 @@ pub async fn auth(
             .await
             .map_err(|_| ApiError::new(StatusCode::UNAUTHORIZED, "invalid api key"))?
             .into_inner();
-        Identity { user_id: res.user_id, email: res.email, roles: vec![], permissions: res.scopes }
+        Identity { user_id: res.user_id, email: res.email, roles: vec![], permissions: res.scopes, tenant_id: String::new(), project_id: String::new() }
     } else {
         let res = state
             .auth
@@ -63,7 +65,7 @@ pub async fn auth(
             .await
             .map_err(|_| ApiError::new(StatusCode::UNAUTHORIZED, "invalid or expired token"))?
             .into_inner();
-        Identity { user_id: res.user_id, email: res.email, roles: res.roles, permissions: res.permissions }
+        Identity { user_id: res.user_id, email: res.email, roles: res.roles, permissions: res.permissions, tenant_id: res.tenant_id, project_id: res.project_id }
     };
 
     req.extensions_mut().insert(identity);
@@ -109,5 +111,12 @@ pub fn attach_identity<T>(req: &mut tonic::Request<T>, id: &Identity) {
     }
     if let Ok(v) = MetadataValue::try_from(id.permissions.join(",")) {
         md.insert("x-user-permissions", v);
+    }
+    // M6: forward the active tenant/project so internal services can scope.
+    if let Ok(v) = MetadataValue::try_from(&id.tenant_id) {
+        md.insert("x-tenant-id", v);
+    }
+    if let Ok(v) = MetadataValue::try_from(&id.project_id) {
+        md.insert("x-project-id", v);
     }
 }
