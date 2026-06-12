@@ -23,6 +23,7 @@ use crate::ratelimit::{self, RateLimiter};
 pub fn build(state: AppState, limiter: RateLimiter) -> Router {
     let protected = Router::new()
         .route("/auth/logout", post(logout))
+        .route("/auth/password", post(change_password)) // self-service password change
         .route("/me", get(get_identity))
         .route("/me/memberships", get(list_memberships))
         .route("/auth/switch", post(switch_tenant))
@@ -116,6 +117,12 @@ struct TokenBody {
 #[derive(Deserialize)]
 struct ResetPasswordBody {
     token: String,
+    new_password: String,
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordBody {
+    old_password: String,
     new_password: String,
 }
 
@@ -265,6 +272,22 @@ async fn reset_password(
         .auth
         .reset_password(authpb::ResetPasswordRequest { token: body.token, new_password: body.new_password })
         .await?;
+    Ok(Json(json!({ "success": true })))
+}
+
+// Authenticated self-service password change; attach_identity carries the caller
+// so the auth service knows whose password to rotate.
+async fn change_password(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Json(body): Json<ChangePasswordBody>,
+) -> ApiResult<Json<Value>> {
+    let mut req = Request::new(authpb::ChangePasswordRequest {
+        old_password: body.old_password,
+        new_password: body.new_password,
+    });
+    attach_identity(&mut req, &identity);
+    state.auth.change_password(req).await?;
     Ok(Json(json!({ "success": true })))
 }
 
