@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use axum::extract::{Form, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::from_fn_with_state;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -21,23 +22,25 @@ use crate::clients::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/authorize", get(authorize))
+pub fn routes(limiter: crate::ratelimit::RateLimiter) -> Router<AppState> {
+    // The credential-checking steps share the per-IP brute-force limiter so the
+    // browser flow isn't an unthrottled password/TOTP oracle. /token is a
+    // back-channel call (client_secret/PKCE), not a per-IP brute target.
+    let limited = Router::new()
         .route("/authorize/login", post(authorize_login))
         .route("/authorize/totp", post(authorize_totp))
+        .route_layer(from_fn_with_state(limiter, crate::ratelimit::limit));
+    Router::new()
+        .route("/authorize", get(authorize))
         .route("/authorize/consent", post(authorize_consent))
         .route("/token", post(token))
         .route("/logout", get(logout))
+        .merge(limited)
 }
 
 // OIDC RP-initiated end-session: clear the browser session, return to caller.
 async fn logout(headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
-    let dest = q
-        .get("post_logout_redirect_uri")
-        .filter(|d| d.starts_with("http://") || d.starts_with("https://"))
-        .cloned()
-        .unwrap_or_else(|| "/".to_string());
+    let dest = post_logout_dest(q.get("post_logout_redirect_uri").map(|s| s.as_str()));
     let mut resp = Redirect::to(&dest).into_response();
     let clear = format!(
         "iam_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
@@ -47,6 +50,24 @@ async fn logout(headers: HeaderMap, Query(q): Query<HashMap<String, String>>) ->
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
+}
+
+// Prevent an open redirect off /logout: a same-origin relative path is always
+// fine; an absolute URL is only honored if it exactly matches an entry in
+// OIDC_POST_LOGOUT_REDIRECT_URIS (comma-separated). Anything else → "/".
+fn post_logout_dest(dest: Option<&str>) -> String {
+    let dest = match dest {
+        Some(d) if !d.is_empty() => d,
+        _ => return "/".to_string(),
+    };
+    if dest.starts_with('/') && !dest.starts_with("//") {
+        return dest.to_string();
+    }
+    let allow = std::env::var("OIDC_POST_LOGOUT_REDIRECT_URIS").unwrap_or_default();
+    if allow.split(',').map(str::trim).any(|a| !a.is_empty() && a == dest) {
+        return dest.to_string();
+    }
+    "/".to_string()
 }
 
 #[derive(Deserialize)]

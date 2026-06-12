@@ -2,7 +2,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::from_fn_with_state;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -67,17 +67,18 @@ pub fn build(state: AppState, limiter: RateLimiter) -> Router {
         .route("/auth/verify-email", post(verify_email))
         .route("/auth/password-reset/request", post(request_password_reset))
         .route("/auth/password-reset", post(reset_password))
-        .route_layer(from_fn_with_state(limiter, ratelimit::limit));
+        .route_layer(from_fn_with_state(limiter.clone(), ratelimit::limit));
 
     let public = Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .merge(crate::docs::routes())
         .merge(crate::oidc::routes())
-        .merge(crate::authorize::routes())
+        .merge(crate::authorize::routes(limiter))
         .merge(auth_public);
 
     public
         .merge(protected)
+        .layer(from_fn(crate::middleware::security_headers)) // nosniff/frame/referrer/HSTS
         .layer(DefaultBodyLimit::max(1 << 20)) // 1 MiB request-body cap (DoS guard)
         .with_state(state)
 }

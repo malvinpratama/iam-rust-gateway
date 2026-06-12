@@ -26,6 +26,7 @@ pub struct RateLimiter {
     backend: Backend,
     limit: u32,
     window: Duration,
+    fallback: Memory, // used when the Redis backend errors (instead of failing open)
 }
 
 impl RateLimiter {
@@ -44,7 +45,7 @@ impl RateLimiter {
             },
             _ => Backend::Memory(Arc::new(Mutex::new(HashMap::new()))),
         };
-        Self { backend, limit, window }
+        Self { backend, limit, window, fallback: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     async fn check(&self, ip: IpAddr) -> bool {
@@ -52,16 +53,7 @@ impl RateLimiter {
             return true; // disabled
         }
         match &self.backend {
-            Backend::Memory(map) => {
-                let now = Instant::now();
-                let mut map = map.lock().unwrap();
-                let entry = map.entry(ip).or_insert((0, now + self.window));
-                if now >= entry.1 {
-                    *entry = (0, now + self.window);
-                }
-                entry.0 += 1;
-                entry.0 <= self.limit
-            }
+            Backend::Memory(map) => check_memory(map, ip, self.limit, self.window),
             Backend::Redis(cm) => {
                 let secs = self.window.as_secs().max(1);
                 let bucket = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) / secs;
@@ -74,11 +66,26 @@ impl RateLimiter {
                 let mut conn = cm.clone();
                 match script.key(&key).arg(secs).invoke_async::<i64>(&mut conn).await {
                     Ok(n) => n <= self.limit as i64,
-                    Err(_) => true, // fail-open if Redis errors
+                    // Fail closed-ish: fall back to the local in-memory limiter
+                    // instead of allowing the request, so a Redis outage can't
+                    // open a brute-force window.
+                    Err(_) => check_memory(&self.fallback, ip, self.limit, self.window),
                 }
             }
         }
     }
+}
+
+// Per-IP fixed-window check against an in-memory map.
+fn check_memory(map: &Memory, ip: IpAddr, limit: u32, window: Duration) -> bool {
+    let now = Instant::now();
+    let mut map = map.lock().unwrap();
+    let entry = map.entry(ip).or_insert((0, now + window));
+    if now >= entry.1 {
+        *entry = (0, now + window);
+    }
+    entry.0 += 1;
+    entry.0 <= limit
 }
 
 async fn connect_redis(url: &str) -> Option<redis::aio::ConnectionManager> {
