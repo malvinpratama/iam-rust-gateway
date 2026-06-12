@@ -549,6 +549,16 @@ async fn get_user(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     identity.require("user:read")?;
+    // Tenant-scope the lookup: a profile is only visible to admins of a tenant the
+    // target belongs to. ListMembers is already scoped to the caller's active
+    // tenant, so an id outside it returns 404 rather than leaking another tenant's
+    // user (its very existence included).
+    let mut mreq = Request::new(authpb::ListMembersRequest {});
+    attach_identity(&mut mreq, &identity);
+    let members = state.auth.list_members(mreq).await?.into_inner().members;
+    if !members.iter().any(|m| m.user_id == id) {
+        return Err(tonic::Status::not_found("user not found").into());
+    }
     let mut req = Request::new(userpb::GetProfileRequest { user_id: id });
     attach_identity(&mut req, &identity);
     let p = state.user.get_profile(req).await?.into_inner();
