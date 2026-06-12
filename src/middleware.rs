@@ -3,7 +3,7 @@
 use axum::async_trait;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
-use axum::http::{header::AUTHORIZATION, StatusCode};
+use axum::http::{header::AUTHORIZATION, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use tonic::metadata::MetadataValue;
@@ -119,4 +119,28 @@ pub fn attach_identity<T>(req: &mut tonic::Request<T>, id: &Identity) {
     if let Ok(v) = MetadataValue::try_from(&id.project_id) {
         md.insert("x-project-id", v);
     }
+}
+
+/// Set conservative security headers on every response: stop MIME sniffing,
+/// forbid framing (clickjacking guard for the OIDC login/consent HTML), and trim
+/// referrer leakage. HSTS is added only when the edge terminated TLS
+/// (X-Forwarded-Proto=https) so local HTTP dev is unaffected.
+pub async fn security_headers(req: Request, next: Next) -> Response {
+    let https = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v.eq_ignore_ascii_case("https"));
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert("X-Content-Type-Options", HeaderValue::from_static("nosniff"));
+    h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    h.insert("Referrer-Policy", HeaderValue::from_static("no-referrer"));
+    if https {
+        h.insert(
+            "Strict-Transport-Security",
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
+    resp
 }

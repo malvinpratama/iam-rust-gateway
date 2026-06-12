@@ -37,7 +37,16 @@ impl From<Status> for ApiError {
             Code::FailedPrecondition => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        Self::new(code, s.message().to_string())
+        // Only surface the service message for codes we deliberately map to a 4xx
+        // (those are written for clients). For Internal/Unknown/Unavailable etc.
+        // return a generic message so a wrapped SQL/driver/connection error can't
+        // leak schema or infra detail to the client.
+        let message = if code == StatusCode::INTERNAL_SERVER_ERROR {
+            "internal error".to_string()
+        } else {
+            s.message().to_string()
+        };
+        Self::new(code, message)
     }
 }
 
