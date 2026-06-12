@@ -526,11 +526,11 @@ async fn list_permissions(
     identity: Identity,
 ) -> ApiResult<Json<Value>> {
     identity.require("role:read")?;
-    let res = state
-        .auth
-        .list_permissions(authpb::ListPermissionsRequest {})
-        .await?
-        .into_inner();
+    // Forward the caller's identity so the auth service's defense-in-depth
+    // require_perm sees the permissions (else it denies → 403).
+    let mut req = Request::new(authpb::ListPermissionsRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_permissions(req).await?.into_inner();
     let perms: Vec<Value> = res
         .permissions
         .into_iter()
@@ -811,7 +811,11 @@ async fn list_roles(
     identity: Identity,
 ) -> ApiResult<Json<Value>> {
     identity.require("role:read")?;
-    let res = state.auth.list_roles(authpb::ListRolesRequest {}).await?.into_inner();
+    // Forward the caller's identity so the auth service's defense-in-depth
+    // require_perm("role:read") sees the permissions (else it denies → 403).
+    let mut req = Request::new(authpb::ListRolesRequest {});
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_roles(req).await?.into_inner();
     let roles: Vec<Value> = res
         .roles
         .into_iter()
