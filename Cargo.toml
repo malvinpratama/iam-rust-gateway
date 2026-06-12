@@ -27,5 +27,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 anyhow = "1"
+# Pin away from time 0.3.48, which conflicts with async-nats 0.37 (pulled in
+# transitively via `common`) — E0119. No Cargo.lock is tracked so a fresh resolve
+# otherwise picks the broken version. Drop once async-nats is upgraded.
+time = "=0.3.47"
 axum-tracing-opentelemetry = "0.38"
 axum-prometheus = "0.10"
